@@ -1,0 +1,365 @@
+#include <cmath>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
+#include <iostream>
+#include <memory>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+#include <system_error>
+#include <utility>
+
+struct Student {
+    std::string id;
+    std::string name;
+    std::string course;
+    double gpa = 0.0;
+};
+
+struct Node {
+    explicit Node(Student value) : student(std::move(value)) {}
+
+    Student student;
+    Node* next = nullptr;
+};
+
+class StudentList {
+public:
+    StudentList() = default;
+    StudentList(const StudentList&) = delete;
+    StudentList& operator=(const StudentList&) = delete;
+
+    ~StudentList() { clear(); }
+
+    bool contains(const std::string& id) const {
+        for (const Node* current = head_; current; current = current->next) {
+            if (current->student.id == id) return true;
+        }
+        return false;
+    }
+
+    bool add(Student student) {
+        if (contains(student.id)) return false;
+        std::unique_ptr<Node> node(new Node(std::move(student)));
+        Node** link = &head_;
+        while (*link) link = &((*link)->next);
+        *link = node.release();
+        ++size_;
+        return true;
+    }
+
+    bool remove(const std::string& id) {
+        Node** link = &head_;
+        while (*link && (*link)->student.id != id) link = &((*link)->next);
+        if (!*link) return false;
+        Node* removed = *link;
+        *link = removed->next;
+        delete removed;
+        --size_;
+        return true;
+    }
+
+    Student* find(const std::string& id) {
+        for (Node* current = head_; current; current = current->next) {
+            if (current->student.id == id) return &current->student;
+        }
+        return nullptr;
+    }
+
+    const Student* find(const std::string& id) const {
+        for (const Node* current = head_; current; current = current->next) {
+            if (current->student.id == id) return &current->student;
+        }
+        return nullptr;
+    }
+
+    void sortById() { head_ = mergeSort(head_, false); }
+    void sortByName() { head_ = mergeSort(head_, true); }
+
+    void print() const {
+        if (!head_) {
+            std::cout << "\nNo student records yet.\n";
+            return;
+        }
+
+        std::cout << '\n'
+                  << std::left << std::setw(18) << "STUDENT ID"
+                  << std::setw(28) << "NAME"
+                  << std::setw(16) << "COURSE"
+                  << "GPA\n"
+                  << std::string(72, '-') << '\n';
+        for (const Node* current = head_; current; current = current->next) {
+            std::cout << std::left << std::setw(18) << current->student.id
+                      << std::setw(28) << current->student.name
+                      << std::setw(16) << current->student.course
+                      << std::fixed << std::setprecision(2) << current->student.gpa
+                      << '\n';
+        }
+        std::cout << "\nTotal records: " << size_ << '\n';
+    }
+
+    bool load(const std::string& path, std::string& error) {
+        std::ifstream input(path);
+        if (!input) {
+            if (std::filesystem::exists(path)) {
+                error = "Could not open the data file for reading: " + path;
+                return false;
+            }
+            return true;
+        }
+
+        std::string line;
+        std::size_t lineNumber = 0;
+        while (std::getline(input, line)) {
+            ++lineNumber;
+            if (line.empty()) continue;
+
+            std::istringstream row(line);
+            Student student;
+            if (!(row >> std::quoted(student.id) >> std::quoted(student.name)
+                      >> std::quoted(student.course) >> student.gpa) ||
+                student.id.empty() || student.name.empty() ||
+                student.course.empty() ||
+                !std::isfinite(student.gpa) || student.gpa < 0.0 ||
+                student.gpa > 4.0 || contains(student.id)) {
+                std::cerr << "Skipping invalid or duplicate record on line "
+                          << lineNumber << ".\n";
+                continue;
+            }
+            add(std::move(student));
+        }
+
+        if (input.bad()) {
+            error = "An error occurred while reading the data file: " + path;
+            return false;
+        }
+        return true;
+    }
+
+    bool save(const std::string& path, std::string& error) const {
+        const std::filesystem::path filePath(path);
+        const std::filesystem::path parent = filePath.parent_path();
+        if (!parent.empty()) {
+            std::error_code filesystemError;
+            std::filesystem::create_directories(parent, filesystemError);
+            if (filesystemError) {
+                error = "Could not create the data directory: " +
+                        filesystemError.message();
+                return false;
+            }
+        }
+
+        std::ofstream output(path, std::ios::trunc);
+        if (!output) {
+            error = "Could not open the data file for writing: " + path;
+            return false;
+        }
+        for (const Node* current = head_; current; current = current->next) {
+            output << std::quoted(current->student.id) << ' '
+                   << std::quoted(current->student.name) << ' '
+                   << std::quoted(current->student.course) << ' '
+                   << std::setprecision(17) << current->student.gpa << '\n';
+        }
+        output.flush();
+        if (!output) {
+            error = "Could not finish saving the data file: " + path;
+            return false;
+        }
+        return true;
+    }
+
+private:
+    Node* head_ = nullptr;
+    std::size_t size_ = 0;
+
+    static Node* merge(Node* left, Node* right, bool byName) {
+        Node dummy(Student{});
+        Node* tail = &dummy;
+
+        while (left && right) {
+            const bool takeLeft = byName
+                ? (left->student.name == right->student.name
+                       ? left->student.id <= right->student.id
+                       : left->student.name < right->student.name)
+                : left->student.id <= right->student.id;
+            Node*& next = takeLeft ? left : right;
+            tail->next = next;
+            next = next->next;
+            tail = tail->next;
+        }
+        tail->next = left ? left : right;
+        return dummy.next;
+    }
+
+    static Node* mergeSort(Node* head, bool byName) {
+        if (!head || !head->next) return head;
+
+        Node* slow = head;
+        Node* fast = head->next;
+        while (fast && fast->next) {
+            slow = slow->next;
+            fast = fast->next->next;
+        }
+        Node* right = slow->next;
+        slow->next = nullptr;
+        return merge(mergeSort(head, byName), mergeSort(right, byName), byName);
+    }
+
+    void clear() {
+        while (head_) {
+            Node* next = head_->next;
+            delete head_;
+            head_ = next;
+        }
+        size_ = 0;
+    }
+};
+
+std::string readLine(const std::string& prompt) {
+    std::cout << prompt;
+    std::string value;
+    std::getline(std::cin, value);
+    return value;
+}
+
+bool readGpa(double& gpa) {
+    const std::string value = readLine("GPA (0.00 - 4.00): ");
+    try {
+        std::size_t parsed = 0;
+        gpa = std::stod(value, &parsed);
+        return parsed == value.size() && std::isfinite(gpa) &&
+               gpa >= 0.0 && gpa <= 4.0;
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+
+bool saveChanges(const StudentList& students, const std::string& path) {
+    std::string error;
+    if (students.save(path, error)) return true;
+    std::cerr << error << "\nThe change is in memory but was not saved.\n";
+    return false;
+}
+
+void addStudent(StudentList& students, const std::string& path) {
+    Student student;
+    student.id = readLine("Student ID: ");
+    if (student.id.empty() || students.contains(student.id)) {
+        std::cout << (student.id.empty() ? "Student ID is required.\n"
+                                         : "That student ID already exists.\n");
+        return;
+    }
+    student.name = readLine("Full name: ");
+    student.course = readLine("Course / program: ");
+    if (student.name.empty() || student.course.empty()) {
+        std::cout << "Name and course are required.\n";
+        return;
+    }
+    if (!readGpa(student.gpa)) {
+        std::cout << "Enter a valid GPA from 0.00 to 4.00.\n";
+        return;
+    }
+    students.add(std::move(student));
+    saveChanges(students, path);
+}
+
+void editStudent(StudentList& students, const std::string& path) {
+    const std::string id = readLine("Student ID to edit: ");
+    Student* student = students.find(id);
+    if (!student) {
+        std::cout << "No student found with that ID.\n";
+        return;
+    }
+    Student updated;
+    updated.id = id;
+    updated.name = readLine("New full name: ");
+    updated.course = readLine("New course / program: ");
+    if (updated.name.empty() || updated.course.empty() || !readGpa(updated.gpa)) {
+        std::cout << "Update cancelled: provide a name, course, and valid GPA.\n";
+        return;
+    }
+    *student = std::move(updated);
+    saveChanges(students, path);
+}
+
+void printMenu() {
+    std::cout << "\n  1. Add student\n"
+              << "  2. View all students\n"
+              << "  3. Search by student ID\n"
+              << "  4. Edit student\n"
+              << "  5. Delete student\n"
+              << "  6. Sort by student ID\n"
+              << "  7. Sort by name\n"
+              << "  0. Save and exit\n";
+}
+
+int main(int argc, char* argv[]) {
+    std::error_code pathError;
+    const std::filesystem::path executablePath =
+        std::filesystem::absolute(std::filesystem::path(argv[0]), pathError);
+    const std::filesystem::path defaultDataPath =
+        (pathError ? std::filesystem::current_path()
+                   : executablePath.parent_path()) / "students.txt";
+    const std::string dataPath =
+        argc > 1 ? argv[1] : defaultDataPath.string();
+    StudentList students;
+    std::string error;
+    if (!students.load(dataPath, error)) {
+        std::cerr << error << '\n';
+        return 1;
+    }
+
+    std::cout << "============================================\n"
+              << "  PLSP  |  STUDENT RECORD MANAGEMENT SYSTEM\n"
+              << "  Pamantasan ng Lungsod ng San Pablo\n"
+              << "============================================\n"
+              << "School logo asset: OIP.webp (keep it beside the program)\n"
+              << "Data file: " << dataPath << "\n";
+
+    bool running = true;
+    while (running) {
+        printMenu();
+        const std::string choice = readLine("\nChoose an option: ");
+        if (!std::cin) break;
+
+        if (choice == "1") {
+            addStudent(students, dataPath);
+        } else if (choice == "2") {
+            students.print();
+        } else if (choice == "3") {
+            const std::string id = readLine("Student ID to find: ");
+            const Student* student = students.find(id);
+            if (!student) {
+                std::cout << "No student found with that ID.\n";
+            } else {
+                std::cout << "\nID: " << student->id << "\nName: " << student->name
+                          << "\nCourse: " << student->course << "\nGPA: "
+                          << std::fixed << std::setprecision(2) << student->gpa << '\n';
+            }
+        } else if (choice == "4") {
+            editStudent(students, dataPath);
+        } else if (choice == "5") {
+            const std::string id = readLine("Student ID to delete: ");
+            if (!students.remove(id)) {
+                std::cout << "No student found with that ID.\n";
+            } else {
+                saveChanges(students, dataPath);
+            }
+        } else if (choice == "6") {
+            students.sortById();
+            saveChanges(students, dataPath);
+            std::cout << "Records sorted by student ID.\n";
+        } else if (choice == "7") {
+            students.sortByName();
+            saveChanges(students, dataPath);
+            std::cout << "Records sorted by name.\n";
+        } else if (choice == "0") {
+            if (saveChanges(students, dataPath)) running = false;
+        } else {
+            std::cout << "Choose one of the listed options.\n";
+        }
+    }
+
+    return 0;
+}
